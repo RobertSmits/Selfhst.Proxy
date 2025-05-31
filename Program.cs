@@ -1,19 +1,23 @@
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using Microsoft.AspNetCore.Mvc;
 
 public partial class Program
 {
     const int PORT = 4050;
     const string CDN_ROOT = "https://cdn.jsdelivr.net/gh/selfhst/icons";
     const string CDN_PATH = "svg";
-    private static readonly HashSet<string> _imageExtensions = new(StringComparer.OrdinalIgnoreCase) { "png", "webp", "svg" };
 
-    [GeneratedRegex(@"fill:\s*#fff", RegexOptions.IgnoreCase, "en-BE")]
+    private static readonly HashSet<string> _imageExtensions = new(StringComparer.OrdinalIgnoreCase)
+        { "png", "webp", "svg" };
+
+    [GeneratedRegex(@"fill\s*:\s*#[0-9a-fA-F]{3,6}", RegexOptions.IgnoreCase, "en-BE")]
     private static partial Regex StyleRegex();
 
-    [GeneratedRegex("fill=\"#fff\"", RegexOptions.IgnoreCase, "en-BE")]
+    [GeneratedRegex(@"fill\s*=\s*""#[0-9a-fA-F]{3,6}""", RegexOptions.IgnoreCase, "en-BE")]
     private static partial Regex AttributeRegex();
 
-    [GeneratedRegex(@"stop-color:\s*#fff(?![a-fA-F0-9])", RegexOptions.IgnoreCase, "en-BE")]
+    [GeneratedRegex(@"stop-color\s*:\s*#[0-9a-fA-F]{3,6}", RegexOptions.IgnoreCase, "en-BE")]
     private static partial Regex StopColorRegex();
 
     public static void Main(string[] args)
@@ -24,27 +28,34 @@ public partial class Program
             client.BaseAddress = new Uri(CDN_ROOT);
             client.DefaultRequestHeaders.UserAgent.ParseAdd("SelfHostedIconServer/1.0");
         });
+        builder.Services.ConfigureHttpJsonOptions(options =>
+        {
+            options.SerializerOptions.TypeInfoResolverChain.Insert(0, AppJsonSerializerContext.Default);
+        });
 
         var app = builder.Build();
 
         app.MapGet("/", () => "Self-hosted icon server");
 
-        app.MapGet("/{**urlPath}", async (IHttpClientFactory httpClientFactory, HttpContext context, string urlPath) =>
+        app.MapGet("/{**urlPath}", async (IHttpClientFactory httpClientFactory, HttpContext context,
+            [FromRoute] string urlPath, [FromQuery] string? color) =>
         {
+            var externalUri = default(Uri);
+            color ??= string.Empty;
+            urlPath = Uri.UnescapeDataString(urlPath);
             var extMatch = Regex.Match(urlPath, @"\.(\w+)$");
-            var colorQuery = context.Request.Query["color"].ToString();
-            var externalUrl = context.Request.Query["external"].ToString();
-
-            var hasColor = !string.IsNullOrWhiteSpace(colorQuery);
-            var color = colorQuery.StartsWith("#") ? colorQuery : $"#{colorQuery}";
-
+            var isExternal = urlPath.StartsWith("http") &&
+                             Uri.TryCreate(urlPath, UriKind.Absolute, out externalUri);
+            var hasColor = !string.IsNullOrWhiteSpace(color);
+            var hexColor = color.StartsWith("#") ? color : $"#{color}";
             var httpClient = httpClientFactory.CreateClient("cdn");
 
             // Support external SVG
-            if (!string.IsNullOrWhiteSpace(externalUrl) && Uri.TryCreate(externalUrl, UriKind.Absolute, out var externalUri))
+            if (isExternal)
             {
                 var externalResponse = await httpClient.GetAsync(externalUri);
-                if (!externalResponse.IsSuccessStatusCode || !externalUri.AbsolutePath.EndsWith(".svg", StringComparison.OrdinalIgnoreCase))
+                if (!externalResponse.IsSuccessStatusCode ||
+                    !externalUri.AbsolutePath.EndsWith(".svg", StringComparison.OrdinalIgnoreCase))
                 {
                     return Results.NotFound("Invalid external SVG");
                 }
@@ -52,7 +63,7 @@ public partial class Program
                 var svgContent = await externalResponse.Content.ReadAsStringAsync();
                 if (hasColor)
                 {
-                    svgContent = ApplyColorToSvg(svgContent, color);
+                    svgContent = ApplyColorToSvg(svgContent, hexColor);
                 }
 
                 context.Response.ContentType = "image/svg+xml";
@@ -104,7 +115,7 @@ public partial class Program
             }
 
             var localSvgContent = await suffixResult.Content.ReadAsStringAsync();
-            localSvgContent = ApplyColorToSvg(localSvgContent, color);
+            localSvgContent = ApplyColorToSvg(localSvgContent, hexColor);
 
             context.Response.ContentType = "image/svg+xml";
             await context.Response.WriteAsync(localSvgContent);
@@ -140,6 +151,12 @@ public partial class Program
         svg = AttributeRegex().Replace(svg, $"fill=\"{color}\"");
         svg = StyleRegex().Replace(svg, $"fill:{color}");
         svg = StopColorRegex().Replace(svg, $"stop-color:{color}");
+
         return svg;
     }
+}
+
+[JsonSerializable(typeof(string))]
+internal partial class AppJsonSerializerContext : JsonSerializerContext
+{
 }
