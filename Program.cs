@@ -7,12 +7,17 @@ public partial class Program
     const string CDN_PATH = "svg";
     private static readonly HashSet<string> _imageExtensions = new(StringComparer.OrdinalIgnoreCase) { "png", "webp", "svg" };
 
+    [GeneratedRegex(@"fill:\s*#fff", RegexOptions.IgnoreCase, "en-BE")]
+    private static partial Regex StyleRegex();
+
     [GeneratedRegex("fill=\"#fff\"", RegexOptions.IgnoreCase, "en-BE")]
     private static partial Regex AttributeRegex();
 
+    [GeneratedRegex(@"stop-color:\s*#fff(?![a-fA-F0-9])", RegexOptions.IgnoreCase, "en-BE")]
+    private static partial Regex StopColorRegex();
+
     public static void Main(string[] args)
     {
-
         var builder = WebApplication.CreateBuilder(args);
         builder.Services.AddHttpClient("cdn", client =>
         {
@@ -26,9 +31,36 @@ public partial class Program
 
         app.MapGet("/{**urlPath}", async (IHttpClientFactory httpClientFactory, HttpContext context, string urlPath) =>
         {
-            var httpClient = httpClientFactory.CreateClient("cdn");
             var extMatch = Regex.Match(urlPath, @"\.(\w+)$");
+            var colorQuery = context.Request.Query["color"].ToString();
+            var externalUrl = context.Request.Query["external"].ToString();
 
+            var hasColor = !string.IsNullOrWhiteSpace(colorQuery);
+            var color = colorQuery.StartsWith("#") ? colorQuery : $"#{colorQuery}";
+
+            var httpClient = httpClientFactory.CreateClient("cdn");
+
+            // Support external SVG
+            if (!string.IsNullOrWhiteSpace(externalUrl) && Uri.TryCreate(externalUrl, UriKind.Absolute, out var externalUri))
+            {
+                var externalResponse = await httpClient.GetAsync(externalUri);
+                if (!externalResponse.IsSuccessStatusCode || !externalUri.AbsolutePath.EndsWith(".svg", StringComparison.OrdinalIgnoreCase))
+                {
+                    return Results.NotFound("Invalid external SVG");
+                }
+
+                var svgContent = await externalResponse.Content.ReadAsStringAsync();
+                if (hasColor)
+                {
+                    svgContent = ApplyColorToSvg(svgContent, color);
+                }
+
+                context.Response.ContentType = "image/svg+xml";
+                await context.Response.WriteAsync(svgContent);
+                return Results.Empty;
+            }
+
+            // Local CDN fallback logic
             if (!extMatch.Success)
             {
                 return Results.NotFound("File not found");
@@ -57,9 +89,6 @@ public partial class Program
                 _ => null
             };
 
-            var colorQuery = context.Request.Query["color"].ToString();
-            var hasColor = !string.IsNullOrWhiteSpace(colorQuery);
-
             if (ext != "svg" || !hasColor)
             {
                 return await FetchAndPipeToResult(httpClient, mainUrl, context.Response);
@@ -74,46 +103,43 @@ public partial class Program
                 return await FetchAndPipeToResult(httpClient, mainUrl, context.Response);
             }
 
-            var svgContent = await suffixResult.Content.ReadAsStringAsync();
-            var color = colorQuery.StartsWith("#") ? colorQuery : $"#{colorQuery}";
-
-            svgContent = AttributeRegex().Replace(svgContent, $"fill=\"{color}\"");
-
-            svgContent = Regex.Replace(svgContent, @"style=""[^""]*fill:\s*#fff[^""]*""", match =>
-            {
-                var updated = Regex.Replace(match.Value, @"fill:\s*#fff", $"fill:{color}", RegexOptions.IgnoreCase);
-                return updated;
-            }, RegexOptions.IgnoreCase);
-
-            svgContent = AttributeRegex().Replace(svgContent, $"fill=\"{color}\"");
-
+            var localSvgContent = await suffixResult.Content.ReadAsStringAsync();
+            localSvgContent = ApplyColorToSvg(localSvgContent, color);
 
             context.Response.ContentType = "image/svg+xml";
-            await context.Response.WriteAsync(svgContent);
+            await context.Response.WriteAsync(localSvgContent);
             return Results.Empty;
         });
 
         app.Run($"http://0.0.0.0:{PORT}");
+    }
 
-        async Task<IResult> FetchAndPipeToResult(HttpClient client, string url, HttpResponse response)
+    private static async Task<IResult> FetchAndPipeToResult(HttpClient client, string url, HttpResponse response)
+    {
+        var result = await client.GetAsync(url);
+        if (!result.IsSuccessStatusCode)
         {
-            var result = await client.GetAsync(url);
-            if (!result.IsSuccessStatusCode)
-            {
-                return Results.NotFound("File not found");
-            }
-
-            var ext = Path.GetExtension(url).TrimStart('.').ToLower();
-            response.ContentType = ext switch
-            {
-                "svg" => "image/svg+xml",
-                "png" => "image/png",
-                "webp" => "image/webp",
-                _ => "application/octet-stream"
-            };
-
-            await result.Content.CopyToAsync(response.Body);
-            return Results.Empty;
+            return Results.NotFound("File not found");
         }
+
+        var ext = Path.GetExtension(url).TrimStart('.').ToLower();
+        response.ContentType = ext switch
+        {
+            "svg" => "image/svg+xml",
+            "png" => "image/png",
+            "webp" => "image/webp",
+            _ => "application/octet-stream"
+        };
+
+        await result.Content.CopyToAsync(response.Body);
+        return Results.Empty;
+    }
+
+    private static string ApplyColorToSvg(string svg, string color)
+    {
+        svg = AttributeRegex().Replace(svg, $"fill=\"{color}\"");
+        svg = StyleRegex().Replace(svg, $"fill:{color}");
+        svg = StopColorRegex().Replace(svg, $"stop-color:{color}");
+        return svg;
     }
 }
