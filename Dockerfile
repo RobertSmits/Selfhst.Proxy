@@ -19,6 +19,7 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends \
     clang zlib1g-dev
 ARG BUILD_CONFIGURATION=Release
+ARG HUSKY=0
 WORKDIR /src
 COPY ["Selfhst.Proxy.csproj", "."]
 RUN dotnet restore "./Selfhst.Proxy.csproj"
