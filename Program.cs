@@ -19,6 +19,9 @@ public partial class Program
     [GeneratedRegex(@"stop-color\s*:\s*#[0-9a-fA-F]{3,6}", RegexOptions.IgnoreCase, "en-BE")]
     private static partial Regex StopColorRegex();
 
+    [GeneratedRegex(@"stop-color\s*=\s*""#[0-9a-fA-F]{3,6}""", RegexOptions.IgnoreCase, "en-BE")]
+    private static partial Regex StopColorAttributeRegex();
+
     public static void Main(string[] args)
     {
         var builder = WebApplication.CreateBuilder(args);
@@ -150,10 +153,10 @@ public partial class Program
 
     private static string ApplyColorToSvg(string svg, string color)
     {
-        svg = AttributeRegex().Replace(svg, $"fill=\"{color}\"");
         svg = StyleRegex().Replace(svg, $"fill:{color}");
+        svg = AttributeRegex().Replace(svg, $"fill=\"{color}\"");
         svg = StopColorRegex().Replace(svg, $"stop-color:{color}");
-
+        svg = StopColorAttributeRegex().Replace(svg, $"stop-color=\"{color}\"");
         return svg;
     }
 }
